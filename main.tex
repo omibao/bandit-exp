@@ -1,0 +1,899 @@
+\documentclass[UTF8,a4paper,11pt,zihao=5]{ctexart}
+
+% === Packages ===
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage[mathscr]{euscript}
+\usepackage{mathtools}
+\usepackage{xcolor}
+
+\usetikzlibrary{positioning,shapes,arrows,calc,patterns}
+
+% === Theorem Environments ===
+\newtheorem{theorem}{定理}[section]
+\newtheorem{lemma}[theorem]{引理}
+\newtheorem{proposition}[theorem]{命题}
+\newtheorem{corollary}[theorem]{推论}
+\newtheorem{definition}[theorem]{定义}
+\newtheorem{remark}[theorem]{注记}
+\newtheorem{assumption}[theorem]{假设}
+
+\renewcommand{\algorithmicrequire}{\textbf{输入:}}
+\renewcommand{\algorithmicensure}{\textbf{输出:}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Pbb}{\mathbb{P}}
+\newcommand{\ind}{\mathbb{I}}
+\newcommand{\calK}{\mathcal{K}}
+\newcommand{\norm}[1]{\left\|#1\right\|}
+\newcommand{\inner}[1]{\left\langle#1\right\rangle}
+\newcommand{\KL}{D_{\mathrm{KL}}}
+\newcommand{\argmin}{\mathop{\arg\min}}
+\newcommand{\argmax}{\mathop{\arg\max}}
+\newcommand{\regret}[1]{R_{#1}}
+\newcommand{\Regret}{\text{Regret}}
+
+% === Title ===
+\title{\vspace{1.5cm} \heiti 多臂赌博机：理论分析与安全应用 \\[4pt] \large \kaishu ——最优化理论课程设计调研报告}
+\author{\kaishu 姓名：郑恩南 \quad 学号：3120245526}
+\date{}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+多臂赌博机（Multi-armed Bandit, MAB）是序贯决策理论的基本模型，其核心是在探索与利用之间寻求最优权衡。本文围绕随机 Bandit 和对抗 Bandit 两类基本设定展开。在理论层面，给出 UCB1 的完整遗憾上界证明（$\regret{T} = O(\sum_i \log T / \Delta_i)$）和 EXP3 的完整遗憾上界证明（$\regret{T} = O(\sqrt{TK\log K})$），通过 ETC 算法的定量对比阐明自适应探索以 $\Delta_{\min}^{-1}$ 而非 $\Delta_{\min}^{-2}$ 缩放的理论优势。在应用层面，将 Bandit 建模思路应用于模糊测试种子调度、入侵检测器在线选择、渗透测试攻击路径决策和蜜罐部署四个安全场景，并在合成数据上验证了 Thompson 采样在小间隙条件下的显著优势以及 UCB1 对分布突变的天然鲁棒性。安全应用部分目前停留在概念建模阶段，缺乏真实环境下的实证验证，是未来工作的主要方向。
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{引言}
+
+多臂赌博机（Multi-armed Bandit, MAB）问题的标准形式化由 Robbins (1952) 提出，其核心是在探索与利用之间寻求最优权衡。形式化地，每轮决策者从 $K$ 个臂中选择一个并获得随机奖励，目标是最小化累积遗憾——即所选臂的奖励与事后最优固定臂奖励之差的期望和。遗憾的渐近增长率是衡量 Bandit 算法的核心指标：在随机平稳假设下可达 $O(\log T)$~\cite{lai1985}，在对抗设定中为 $O(\sqrt{T})$~\cite{auer2002b}。两类设定之间的理论差距揭示了模型假设强度与算法保证之间的基本权衡。
+
+近年来，Bandit 模型已被应用于推荐系统、临床试验、动态定价等领域，其在网络安全中的应用也引起了关注。Luo 等人~\cite{tscheduler2024} 将模糊测试的种子调度建模为 Bandit 问题，用 Thompson 采样选择下一个变异的种子；Li 等人~\cite{li2010} 提出的 LinUCB 算法为上下文 Bandit 在个性化推荐中的应用奠定了基础；Abbasi-Yadkori 等人~\cite{abbasi2011} 在线性 Bandit 框架下改进的置信椭球构造，为特征丰富的安全场景（如基于多维度漏洞特征的攻击路径评估）提供了理论工具。本文在这些工作的基础上，重点关注四类安全场景的 Bandit 建模：模糊测试种子调度、入侵检测器在线选择、渗透测试攻击路径决策、以及蜜罐部署。
+
+从理论层面看，Bandit 问题的分析核心是遗憾分解：$\regret{T} = \sum_i \Delta_i \, \E[N_i(T)]$，遗憾等于各次优臂的间隙乘以其期望被选次数。UCB1 的分析将次优臂被选中的原因归为估计不准和客观难以区分两类，前者由 Hoeffding 尾部控制（概率不超过 $O(t^{-3})$），后者受限于间隙 $\Delta_i$ 的量级。EXP3 的分析则聚焦于部分信息条件下的方差控制——通过重要性加权将未选臂的缺失信息以概率反比补回，代价是估计方差以 $1/p_{t,i}$ 放大。两类算法在证明结构和所需技术上的差异，反映了平稳性假设对分析难度的影响。
+
+本文的组织如下。第 2 章给出随机 Bandit 和对抗 Bandit 的形式化定义及核心集中不等式。第 3 章给出 UCB1 和 EXP3 的完整遗憾界证明，并通过 ETC 算法的定量对比说明自适应探索的必要性。第 4 章整理各算法的伪代码，讨论工程部署中的冷启动、延迟反馈、安全约束等实际问题。第 5 章分析四个安全应用场景的 Bandit 建模思路，并给出两个合成数据的数值实验。第 6 章总结全文。
+
+\newpage
+\section{基本概念、基本性质}
+
+\subsection{随机 Bandit 模型}
+
+随机 Bandit 由 $K$ 个臂组成。每个臂 $i \in [K] \triangleq \{1, \dots, K\}$ 对应一个定义在 $[0, 1]$ 上的未知概率分布 $\nu_i$，均值为 $\mu_i = \E_{X \sim \nu_i}[X]$。博弈持续 $T$ 轮。第 $t$ 轮：
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2cm]
+    \item 决策者根据历史 $\mathcal{H}_{t-1} = \{I_1, X_1, \dots, I_{t-1}, X_{t-1}\}$ 选择臂 $I_t \in [K]$；
+    \item 环境从 $\nu_{I_t}$ 独立采样奖励 $X_t \in [0, 1]$；
+    \item 决策者仅观测 $X_t$。
+\end{enumerate}
+
+记 $\mu^\star = \max_i \mu_i$，次优性间隙 $\Delta_i = \mu^\star - \mu_i$。假设最优臂唯一，记 $i^\star = \argmax_i \mu_i$。令 $N_i(t) = \sum_{s=1}^{t} \ind\{I_s = i\}$ 为到第 $t$ 轮为止臂 $i$ 被选中的次数。
+
+\begin{definition}[遗憾]
+算法运行 $T$ 轮的期望遗憾定义为
+\begin{equation}\label{eq:regret}
+    \regret{T} = T \mu^\star - \E\left[\sum_{t=1}^{T} X_t\right]
+    = \sum_{i=1}^{K} \Delta_i \cdot \E[N_i(T)].
+\end{equation}
+若 $\regret{T} / T \to 0$（即遗憾次线性增长），称算法是\emph{无遗憾}的。
+\end{definition}
+
+式 (\ref{eq:regret}) 的分解形式 $\regret{T} = \sum_i \Delta_i \cdot \E[N_i(T)]$ 是全文分析的基本出发点。它的含义很直观：遗憾由每个次优臂的间隙 $\Delta_i$ 乘以它的期望被选次数贡献。间隙大的臂即使被选几次也会造成较大遗憾，间隙小的臂需要被大量选择才产生等量遗憾，而最优臂（$\Delta_i=0$）无论如何被选都不贡献遗憾。图 \ref{fig:regret_decomp} 以三臂示例给出了这一关系的直观解释。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.0,
+    arm/.style={rectangle, draw, minimum width=2cm, minimum height=0.7cm, align=center, rounded corners, font=\small},
+    arrow/.style={->, >=stealth, thick}]
+\node[arm, fill=red!15] (a1) at (0, 0) {臂 1: $\Delta_1=0.3$};
+\node[arm, fill=orange!15] (a2) at (3.5, 0) {臂 2: $\Delta_2=0.1$};
+\node[arm, fill=green!15] (a3) at (7, 0) {臂 3: $\Delta_3=0$（最优）};
+\node[font=\small] at (0, -1.0) {$\E[N_1]=10$ 次};
+\node[font=\small] at (3.5, -1.0) {$\E[N_2]=50$ 次};
+\node[font=\small] at (7, -1.0) {$\E[N_3]\approx T$ 次};
+\node[font=\small] at (0, -2.0) {$0.3\times 10 = 3.0$};
+\node[font=\small] at (3.5, -2.0) {$0.1\times 50 = 5.0$};
+\node[font=\small] at (7, -2.0) {$0\times T = 0$};
+\node[font=\small\bfseries] at (3.5, -3.0) {$\regret{T} = 3.0 + 5.0 + 0 = 8.0$};
+\draw[arrow, gray] (0, -0.35) -- (0, -0.7);
+\draw[arrow, gray] (3.5, -0.35) -- (3.5, -0.7);
+\draw[arrow, gray] (7, -0.35) -- (7, -0.7);
+\draw[arrow, gray, dashed] (0, -1.7) -- (0, -1.9);
+\draw[arrow, gray, dashed] (3.5, -1.7) -- (3.5, -1.9);
+\draw[arrow, gray, dashed] (7, -1.7) -- (7, -1.9);
+\end{tikzpicture}
+\caption{遗憾分解示意：$\regret{T} = \sum_i \Delta_i \cdot \E[N_i(T)]$。臂 2 间隙虽小（0.1）但被选中次数多（50 次），贡献的遗憾（5.0）反而超过间隙大的臂 1（3.0）。这解释了为什么 Bandit 算法的分析重心是控制小间隙臂的被选次数。}
+\label{fig:regret_decomp}
+\end{figure}
+
+\subsection{对抗 Bandit 模型}
+
+在对抗 Bandit 中，奖励不由固定分布生成，而是由对手确定。第 $t$ 轮，对手为所有臂指定奖励向量 $\bm{g}_t = (g_{t,1}, \dots, g_{t,K}) \in [0,1]^K$。决策者选择 $I_t$ 后仅观测 $g_{t, I_t}$。遗憾定义为
+\begin{equation}
+    \regret{T} = \max_{i \in [K]} \sum_{t=1}^{T} g_{t,i} - \E\left[\sum_{t=1}^{T} g_{t, I_t}\right].
+\end{equation}
+随机 Bandit 是对抗 Bandit 在 $\bm{g}_t$ 独立同分布时的特例。两类设定下的最优遗憾率不同：随机设定可达 $O(\log T)$，对抗设定只能到 $O(\sqrt{T})$。
+
+\subsection{其他变体简述}
+
+Contextual Bandit~\cite{li2010} 在每轮额外给出上下文特征 $\bm{x}_{t,i} \in \R^d$，期望奖励 $\E[X_t \mid I_t = i] = f(\bm{x}_{t,i})$，$f$ 为未知函数。线性 Bandit~\cite{abbasi2011} 假设 $f(\bm{x}) = \langle \bm{\theta}^\star, \bm{x} \rangle$，利用线性结构共享不同臂之间的统计信息。
+
+KL-UCB~\cite{garivier2011} 通过将 UCB 的 Hoeffding 置信界替换为基于 KL 散度的置信界，可在伯努利奖励下达到渐近最优的常数因子（匹配 Lai--Robbins 下界~\cite{lai1985}）。非平稳 Bandit 处理奖励分布随时间变化的场景，常用策略包括滑动窗口和指数折扣。纯探索（Best Arm Identification）~\cite{dann2017} 与遗憾最小化目标不同——前者追求最终以高置信度输出最优臂，后者追求过程中累积奖励最大。
+
+\subsection{集中不等式}
+
+\begin{lemma}[Hoeffding 不等式]\label{lem:hoeffding}
+设 $X_1, \dots, X_n$ 为独立随机变量，$X_i \in [0, 1]$。$\bar{X} = \frac{1}{n}\sum_{i=1}^{n} X_i$。则对任意 $\varepsilon > 0$，
+\begin{equation}
+    \Pbb(|\bar{X} - \E[\bar{X}]| \geq \varepsilon) \leq 2 \exp(-2n \varepsilon^2).
+\end{equation}
+\end{lemma}
+
+\begin{lemma}[Chernoff 界]\label{lem:chernoff}
+设 $X_1, \dots, X_n$ i.i.d.\ Bernoulli$(p)$，$\bar{X} = \frac{1}{n}\sum_i X_i$。对 $\varepsilon > 0$，
+\begin{align}
+    \Pbb(\bar{X} \geq p + \varepsilon) &\leq \exp(-n \cdot \KL(p+\varepsilon, p)), \\
+    \Pbb(\bar{X} \leq p - \varepsilon) &\leq \exp(-n \cdot \KL(p-\varepsilon, p)),
+\end{align}
+其中 $\KL(q, p) = q \log(q/p) + (1-q) \log((1-q)/(1-p))$。
+\end{lemma}
+
+\begin{lemma}[Pinsker 不等式]\label{lem:pinsker}
+$\KL(P\|Q) \geq 2\|P - Q\|_{\mathrm{TV}}^2$。对伯努利分布有 $\KL(q, p) \geq 2(q-p)^2$。
+\end{lemma}
+
+\begin{lemma}[Bretagnolle--Huber 不等式]\label{lem:bh}
+对概率测度 $P, Q$ 和任意可测集 $A$，
+\begin{equation}
+    P(A) + Q(A^{\complement}) \geq \frac{1}{2} \exp(-\KL(P\|Q)).
+\end{equation}
+\end{lemma}
+
+% ============================================================
+\newpage
+\section{核心算法的遗憾分析}
+
+本章给出 UCB1 的完整证明和 EXP3 的完整证明。对 Thompson 采样和 Lai--Robbins 下界给出有实质内容的证明概要。证明细节主要在 Lattimore \& Szepesvári~\cite{lattimore2020} 和 Auer et al.~\cite{auer2002} 的基础上做了展开和补充，每条推导都标注了所使用的引理。
+
+\subsection{UCB1 的遗憾界}
+
+UCB1 的思想很简单：每轮选 UCB 指数（经验均值 $+$ 置信半径）最大的臂。
+\begin{equation}\label{eq:ucb}
+    I_t = \argmax_{i \in [K]} \left\{ \hat{\mu}_i(t-1) + \sqrt{\frac{2 \log t}{N_i(t-1)}} \right\}.
+\end{equation}
+其中 $\hat{\mu}_i(t-1) = \frac{1}{N_i(t-1)} \sum_{s=1}^{t-1} X_s \ind\{I_s=i\}$。若 $N_i(t-1)=0$，UCB 指数定义为 $+\infty$。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[scale=1.1]
+\draw[->] (0, 0) -- (8.5, 0) node[right] {};
+\node at (8.8, 0) {臂};
+\node at (1.5, -0.4) {臂 1 ($N_1=120$)};
+\node at (4.5, -0.4) {臂 2 ($N_2=15$)};
+\node at (7.5, -0.4) {臂 3 ($N_3=60$)};
+\draw[thick, red!70!black] (1.2, 0) -- (1.8, 0);
+\filldraw[red!70!black] (1.5, 0) circle (2.5pt);
+\draw[thick, red!50] (1.3, -0.5) -- (1.3, 1.0);
+\draw[thick, red!50] (1.7, -0.5) -- (1.7, 1.0);
+\draw[thick, red!70!black] (1.3, -0.5) -- (1.7, -0.5);
+\draw[thick, red!70!black] (1.3, 1.0) -- (1.7, 1.0);
+\draw[dashed, red!30] (1.3, -0.5) -- (1.3, 0) -- (1.7, 0) -- (1.7, 1.0);
+\node[red!70!black, font=\footnotesize] at (2.0, 1.25) {UCB$_1$=0.72+0.06=0.78};
+\draw[thick, blue!70!black] (4.2, -0.7) -- (4.8, -0.7);
+\filldraw[blue!70!black] (4.5, -0.7) circle (2.5pt);
+\draw[thick, blue!50] (4.1, -1.8) -- (4.1, 1.3);
+\draw[thick, blue!50] (4.9, -1.8) -- (4.9, 1.3);
+\draw[thick, blue!70!black] (4.1, -1.8) -- (4.9, -1.8);
+\draw[thick, blue!70!black] (4.1, 1.3) -- (4.9, 1.3);
+\draw[dashed, blue!30] (4.1, -1.8) -- (4.1, -0.7) -- (4.9, -0.7) -- (4.9, 1.3);
+\node[blue!70!black, font=\footnotesize] at (5.3, 1.55) {UCB$_2$=0.68+0.25=0.93};
+\draw[thick, green!60!black] (7.2, 0.4) -- (7.8, 0.4);
+\filldraw[green!60!black] (7.5, 0.4) circle (2.5pt);
+\draw[thick, green!50] (7.3, -0.1) -- (7.3, 1.1);
+\draw[thick, green!50] (7.7, -0.1) -- (7.7, 1.1);
+\draw[thick, green!60!black] (7.3, -0.1) -- (7.7, -0.1);
+\draw[thick, green!60!black] (7.3, 1.1) -- (7.7, 1.1);
+\draw[dashed, green!30] (7.3, -0.1) -- (7.3, 0.4) -- (7.7, 0.4) -- (7.7, 1.1);
+\node[green!60!black, font=\footnotesize] at (7.8, 1.35) {UCB$_3$=0.74+0.10=0.84};
+\draw[->, very thick, blue!70!black] (4.5, 1.6) -- (4.5, 1.9);
+\node[blue!70!black, font=\small\bfseries] at (4.5, 2.15) {$\rightarrow$ 选择臂 2};
+\node[rotate=90] at (-0.3, 0.5) {估计奖励均值};
+\end{tikzpicture}
+\caption{UCB 指数构造示意。实心圆点为经验均值，竖直线段为置信区间 $\hat{\mu}_i \pm \sqrt{2\log t / N_i}$，区间顶部即 UCB 指数。臂 2 经验均值最低但探索次数少、置信半径大，其 UCB 指数反而最高。}
+\label{fig:ucb}
+\end{figure}
+
+\subsubsection{分布依赖的遗憾界}
+
+\begin{theorem}[UCB1 分布依赖界]\label{thm:ucb1}
+对 $K$ 臂随机 Bandit，UCB1 满足
+\begin{equation}\label{eq:ucb1_bound}
+    \regret{T} \leq 8 \sum_{i: \Delta_i > 0} \frac{\log T}{\Delta_i} + \bigl(1 + 2\zeta(3)\bigr) \sum_{i=1}^{K} \Delta_i,
+\end{equation}
+其中 $\zeta(3) = \sum_{t=1}^{\infty} t^{-3} \approx 1.202$（Apéry 常数），$2\zeta(3) \approx 2.404$。
+\end{theorem}
+
+\begin{proof}
+由遗憾分解 $\regret{T} = \sum_i \Delta_i \,\E[N_i(T)]$，只需对 $\Delta_i > 0$ 上界 $\E[N_i(T)]$。
+
+\textbf{步骤 1（三个关键事件）}。对 $t > K$，若 $I_t = i$，则臂 $i$ 的 UCB 指数不低于 $i^\star$ 的：
+\begin{equation}\label{eq:ucb_ineq}
+    \hat{\mu}_i(t-1) + \sqrt{\frac{2 \log t}{N_i(t-1)}} \ge \hat{\mu}_{i^\star}(t-1) + \sqrt{\frac{2 \log t}{N_{i^\star}(t-1)}}.
+\end{equation}
+这意味着以下三个事件至少发生一个（否则代入否定产生矛盾）：
+\begin{align}
+    E_1 &: \hat{\mu}_{i^\star}(t-1) \le \mu^\star - \sqrt{\frac{2 \log t}{N_{i^\star}(t-1)}}, \label{eq:e1}\\
+    E_2 &: \hat{\mu}_i(t-1) \ge \mu_i + \sqrt{\frac{2 \log t}{N_i(t-1)}}, \label{eq:e2}\\
+    E_3 &: \mu^\star < \mu_i + 2\sqrt{\frac{2 \log t}{N_i(t-1)}}. \label{eq:e3}
+\end{align}
+$E_1$ 说的是最优臂的经验均值被严重低估，$E_2$ 是次优臂 $i$ 被严重高估，$E_3$ 是 $i$ 的真值与 $\mu^\star$ 的差距小于两倍置信半径——此时即使估计准确，UCB 也暂时分不出好坏。
+
+\begin{remark}
+三事件分解 $E_1 \lor E_2 \lor E_3$ 是 Bandit 分析中的标准技巧，其逻辑为：假设三个事件的逆同时成立，则代入\eqref{eq:ucb_ineq} 左端严格小于右端，与 $I_t = i$ 矛盾。该技巧将算法选择次优臂的原因系统地归为两类——估计误差（$E_1$ 上界 $i^\star$ 的低估、$E_2$ 上界 $i$ 的高估）和问题本身的难度（$E_3$ 反映 $\Delta_i$ 过小导致即使估计准确也无法可靠区分），这一归类在 UCB 族算法的分析中具有一般性。
+\end{remark}
+
+\textbf{步骤 2（控制 $E_1$、$E_2$ 的概率）}。对任意固定的 $s \ge 1$，臂 $i^\star$ 有 $s$ 次观测时，Hoeffding 不等式（引理 \ref{lem:hoeffding}）给出
+\begin{equation}
+    \Pbb\!\left(\hat{\mu}_{i^\star, s} - \mu^\star \le -\sqrt{\frac{2 \log t}{s}}\right)
+    \le \exp\!\left(-2s \cdot \frac{2\log t}{s}\right) = t^{-4}.
+\end{equation}
+这是单侧版本，因为我们只关心低估方向。对所有 $s = 1, \dots, t$ 取联合界：
+\begin{equation}
+    \Pbb(E_1) \le \sum_{s=1}^{t} t^{-4} = t^{-3}.
+\end{equation}
+同理 $\Pbb(E_2) \le t^{-3}$。对任意固定 $t$，两个估计误差事件在轮次 $t$ 发生的概率均不超过 $t^{-3}$，这是 Hoeffding 尾部的直接结果。
+
+\textbf{步骤 3（$E_3$ 的确定性条件）}。$E_3$ 等价于 $N_i(t-1) < 8 \log t / \Delta_i^{2}$。这是因为当 $N_i(t-1) \ge \lceil 8 \log t / \Delta_i^2 \rceil$ 时，$2\sqrt{2 \log t / N_i(t-1)} \le \Delta_i$，而 $\Delta_i = \mu^\star - \mu_i$，所以 $E_3$ 不可能发生。令 $u = \lceil 8 \log T / \Delta_i^{2} \rceil$。
+
+\textbf{步骤 4（整合）}。分解 $N_i(T)$：
+\begin{equation}\label{eq:nidecomp}
+    N_i(T) = 1 + \!\!\sum_{t=K+1}^{T}\!\! \ind\{I_t = i,\, N_i(t-1) < u\}
+            + \!\!\sum_{t=K+1}^{T}\!\! \ind\{I_t = i,\, N_i(t-1) \ge u\}.
+\end{equation}
+第一项和：每轮若 $N_i(t-1) < u$ 且被选中，$N_i$ 至多加 1，故此项 $\le u$。第二项和：$N_i(t-1) \ge u$ 时 $E_3$ 不可能发生，因此 $I_t = i$ 只能由 $E_1$ 或 $E_2$ 引起。取期望：
+\begin{align}
+    \E[N_i(T)] &\le u + \sum_{t=K+1}^{T} \Pbb(E_1 \lor E_2) \nonumber\\
+               &\le u + \sum_{t=1}^{\infty} 2 t^{-3}
+                = \frac{8 \log T}{\Delta_i^{2}} + 1 + 2\zeta(3). \label{eq:nibound}
+\end{align}
+乘以 $\Delta_i$ 并对所有次优臂求和即得定理结论。$\zeta(3)$ 的数值约为 1.202，所以 $1 + 2\zeta(3) \approx 3.404$；经典文献中常放缩为 $1 + \pi^{2}/3 \approx 4.290$，本文保留了更紧的常数。
+\end{proof}
+
+\subsubsection{分布无关界}
+
+\begin{theorem}[UCB1 分布无关界]\label{thm:ucb1_df}
+UCB1 满足
+\begin{equation}
+    \regret{T} \leq 8 \sqrt{T K \log T} + \bigl(1 + 2\zeta(3)\bigr) \sum_{i=1}^{K} \Delta_i.
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+固定 $\Delta > 0$，臂分两组：$\mathcal{G}_1 = \{i: \Delta_i < \Delta\}$，$\mathcal{G}_2 = \{i: \Delta_i \geq \Delta\}$。$\mathcal{G}_1$ 的遗憾 $\le T\Delta$。$\mathcal{G}_2$ 的遗憾用定理 \ref{thm:ucb1} 界 $\le 8|\mathcal{G}_2|\log T / \Delta + (1+2\zeta(3))\sum_i \Delta_i$。取 $\Delta = \sqrt{8 K \log T / T}$ 平衡前两项，整理即得。
+\end{proof}
+
+\subsection{遗憾下界与探索-利用的固有难度}
+
+UCB1 给出 $O(\log T / \Delta_i)$ 的上界。一个自然的问题是：能不能做得更好？Lai \& Robbins~\cite{lai1985} 的经典结果给出了回答。
+
+\begin{theorem}[Lai--Robbins 下界]\label{thm:lr}
+设奖励分布属于单参数指数族。对任意算法满足一致性条件（对任意 $\alpha > 0$，$\E[N_i(T)] = o(T^{\alpha})$），
+\begin{equation}
+    \liminf_{T \to \infty} \frac{\regret{T}}{\log T} \geq \sum_{i: \Delta_i > 0} \frac{\Delta_i}{\KL(\nu_i, \nu^\star)}.
+\end{equation}
+对 $[0,1]$ 有界奖励，Pinsker 不等式给出 $\KL(\nu_i, \nu^\star) \geq 2 \Delta_i^2$，故
+\begin{equation}
+    \liminf_{T \to \infty} \frac{\regret{T}}{\log T} \geq \sum_{i: \Delta_i > 0} \frac{1}{2\Delta_i}.
+\end{equation}
+\end{theorem}
+
+\begin{proof}[证明思路]
+核心技巧是构造一对仅在某个次优臂 $i$ 的分布上不同的问题实例。原实例中 $\mu_{i^\star} > \mu_i$（臂 $i$ 是次优的），替代实例中更改 $\nu_i$ 使 $\mu_i' > \mu_{i^\star}$（臂 $i$ 变最优）。在原实例下必须 $\E[N_i(T)] = o(T^\alpha)$（一致性要求次优臂不能被大量选择），在替代实例下必须 $\E[N_i(T)] = T - o(T^\alpha)$。Bretagnolle--Huber 不等式将这两个概率差异与 KL 散度挂钩：
+\begin{equation}
+    \KL(P_T \| P_T') = \E_P[N_i(T)] \cdot \KL(\nu_i, \nu_i').
+\end{equation}
+令 $\nu_i'$ 的均值趋近 $\mu^\star$ 并整理，得到 $\liminf \E_P[N_i(T)] / \log T \ge 1/\KL(\nu_i, \nu^\star)$。乘以 $\Delta_i$ 即得。关于测度变换在停时上的合法性，需额外使用可选停时定理，本文不再展开，细节见 Lattimore \& Szepesvári (2020) 第 16 章。
+\end{proof}
+
+比较定理 \ref{thm:ucb1}（上界常数 $8/\Delta_i$）和定理 \ref{thm:lr}（下界常数 $1/(2\Delta_i)$），两者在 $\log T$ 阶上匹配，常数因子相差 16 倍。KL-UCB 通过将置信界替换为 KL 散度形式可将常数因子精确匹配到下界。在介绍完 Thompson 采样和 EXP3 之前，先分析一种更朴素的算法——探索-然后-利用，通过与 UCB1 的对比说明自适应探索的必要性。
+
+\subsection{探索-然后-利用：为什么需要自适应}
+
+探索-然后-利用（Explore-Then-Commit, ETC）的策略很简单：前 $mK$ 轮每臂探索 $m$ 次，之后始终选经验均值最高的臂。
+
+\begin{theorem}[ETC 遗憾界]
+设每臂探索 $m$ 次。ETC 的期望遗憾满足
+\begin{equation}
+    \regret{T} \leq m\sum_{i=1}^{K} \Delta_i + (T - mK)\sum_{i=1}^{K} \Delta_i \cdot 2\exp(-m \Delta_i^2 / 2).
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+探索阶段的遗憾至多 $m\sum_i \Delta_i$。利用阶段，臂 $i$ 被错误选为最优的条件是其经验均值超过 $i^\star$：
+\begin{equation}
+    \Pbb(\hat{\mu}_i \ge \hat{\mu}_{i^\star})
+    \le \Pbb(\hat{\mu}_i - \mu_i \ge \Delta_i/2) + \Pbb(\hat{\mu}_{i^\star} - \mu^\star \le -\Delta_i/2)
+    \le 2\exp(-m\Delta_i^2 / 2).
+\end{equation}
+利用阶段的长度至多 $T-mK$，乘上错误概率和 $\Delta_i$ 即得。
+\end{proof}
+
+取 $m = (2/\Delta_{\min}^2)\log(T\Delta_{\min}^2)$，得 $\regret{T} = O((K/\Delta_{\min}^2)\log T)$。而 UCB1 是 $O((K/\Delta_{\min})\log T)$，差了一个 $\Delta_{\min}^{-1}$ 因子。用具体数字看这个差距：假设 $K=5$，$\Delta_{\min}=0.05$，$T=10000$。ETC 最优 $m \approx 2300$，探索阶段遗憾约 $2300 \times 5 \times 0.5 \approx 5750$。UCB1 的遗憾约 $8 \times 5 \times \log(10000) / 0.05 \approx 7370$，表面上差别不大。但如果 $\Delta_{\min}=0.01$，ETC 的 $m$ 按公式 $(2/\Delta_{\min}^2)\log(T\Delta_{\min}^2)$ 计算时，因 $\log(1)=0$ 而退化——$m$ 的估计在间隙极小时不再可靠。实际上，ETC 所需的探索次数与 $1/\Delta_{\min}^2$ 成正比，当 $\Delta_{\min}$ 缩小时会迅速超过总轮数 $T$，使固定探索策略彻底失效。而 UCB1 的 $1/\Delta$ 依赖在此情况下要温和得多。差距的根源在于 ETC 的探索次数 $m$ 对所有臂一视同仁，无法对间隙大的臂少探索、对间隙小的臂多探索。UCB1 自适应地让置信半径随 $N_i$ 自动调整，从而实现了区分对待。
+
+\subsection{数值示例：三种算法的比较}
+
+在进入 Thompson 采样之前，先用一个具体的数值例子比较 UCB1、ETC 和 Lai--Robbins 下界。取 $K=3$，$\bm{\mu} = (0.7, 0.6, 0.4)$，$T=10000$，$\Delta = (0.1, 0.3)$（臂 1 为最优臂），$\ln T \approx 9.21$。代入上述理论界：
+
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{方法} & \textbf{公式} & \textbf{数值} \\
+\midrule
+UCB1（定理 1）  & $8(\frac{\ln T}{0.1} + \frac{\ln T}{0.3}) + (1+2\zeta(3)) \cdot 0.4$ & $\approx 984$ \\
+ETC（最优 $m$） & $m\sum_i\Delta_i + (T-mK)\sum_i\Delta_i\cdot 2e^{-m\Delta_i^2/2}$ & $\approx 383$ \\
+Lai--Robbins 下界 & $(\frac{1}{2 \times 0.1} + \frac{1}{2 \times 0.3}) \cdot \ln T$ & $\approx 61$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+ETC 的数值（383）在此例中低于 UCB1（984），这似乎与"ETC 劣于 UCB1"的结论矛盾。实际上这个结果是因为本例的 $\Delta_{\min}=0.1$ 相对较大——ETC 在间隙足够大的实例中表现不错，其劣势主要在 $\Delta_{\min}$ 极小时暴露。假设 $\Delta_{\min}=0.01$（其他参数不变），则前述渐近最优 $m$ 的公式 $(2/\Delta_{\min}^2)\log(T\Delta_{\min}^2)$ 因 $T\Delta_{\min}^2 = 1$ 导致对数项退化为 0 而失效——这意味着在该参数区域 ETC 所需的探索次数已不再由对数因子主导。保守估计，即使忽略对数因子，ETC 至少需要 $m = \Omega(1/\Delta_{\min}^2) \approx 10000$ 次探索，仅探索阶段即占满全部 $T=10000$ 轮次，利用阶段不复存在。相比之下，UCB1 的遗憾上界约为 $8(9.21/0.01 + 9.21/0.3) + \text{const} \approx 7614$，仍然可控。两者差距的根源在于：ETC 的遗憾以 $\Delta_{\min}^{-2}$ 缩放，而 UCB1 以 $\Delta_{\min}^{-1}$ 缩放。当 $\Delta_{\min}$ 缩小时，这一指数级差异导致 ETC 的界迅速膨胀，而 UCB1 凭借自适应的探索强度调节，其遗憾界仍然维持在 $O(\log T)$ 的框架内。
+
+\subsection{Thompson 采样}
+
+Thompson 采样~\cite{thompson1933} 用贝叶斯方法处理探索-利用权衡。对伯努利 Bandit，采用 Beta$(1,1)$ 均匀先验，后验更新 $\mu_i \mid \mathcal{H}_t \sim \text{Beta}(1 + S_i(t),\, 1 + N_i(t) - S_i(t))$，其中 $S_i(t)$ 为累积成功次数。每轮从各臂后验采样 $\tilde{\mu}_i \sim \text{Beta}(\alpha_i, \beta_i)$，选 $I_t = \argmax_i \tilde{\mu}_i$。
+
+\begin{theorem}[Agrawal \& Goyal~\cite{agrawal2012}]\label{thm:ts}
+对 $K$ 臂伯努利 Bandit，Thompson 采样满足分布无关界 $\regret{T} = O(\sqrt{KT \log T})$ 和分布依赖界 $\regret{T} = O(\sum_i \log T / \Delta_i^{2})$。
+\end{theorem}
+
+证明利用了 Beta 后验的自然性质（详细教程见 Russo et al.~\cite{russo2018}）：给定历史，$\tilde{\mu}_{i^\star}$ 和 $\tilde{\mu}_i$ 的边缘分布相同。因此次优臂被选中的概率由采样噪声尾部控制，而该尾部随 $N_i(t)$ 的增长指数衰减。Kaufmann 等人~\cite{kaufmann2012} 和 Agrawal \& Goyal (2013) 的后续工作将分布依赖界进一步改进至 $O(\sum_i \log T / \Delta_i)$，但需要关于先验分布和奖励分布的额外技术条件。与 UCB1 相比，Thompson 采样的核心优势在于小样本性能——实验一的数值结果也验证了这一点：间隙仅 0.05 时，TS 的遗憾约为 UCB1 的 28\%。直觉上，随机采样比确定性乐观估计提供了更自然的早期探索。
+
+\subsection{对抗 Bandit：EXP3 算法}
+
+对抗 Bandit 的经典算法是 EXP3~\cite{auer2002b}。其面临的额外困难是部分信息——每轮只看到所选臂的奖励。重要性加权是解决这一困难的基本工具：若臂 $i$ 以概率 $p_{t,i}$ 被选中，定义
+\begin{equation}\label{eq:iw}
+    \hat{g}_{t,i} = \frac{g_{t,i} \cdot \ind\{I_t = i\}}{p_{t,i}},
+\end{equation}
+满足 $\E_{I_t \sim \bm{p}_t}[\hat{g}_{t,i}] = g_{t,i}$。EXP3 将重要性加权与 Hedge（指数权重）结合，本质上是在 Bandit 反馈下运行 Exponentiated Gradient。
+
+EXP3 的每轮操作：
+\begin{enumerate}[label=(\arabic*), leftmargin=1.8cm]
+    \item 计算选择概率 $p_{t,i} = (1-\gamma) \frac{w_{t-1,i}}{\sum_j w_{t-1,j}} + \frac{\gamma}{K}$；
+    \item 依 $\bm{p}_t$ 随机选 $I_t$，观察 $g_{t, I_t}$；
+    \item 构建无偏估计 $\hat{g}_{t,i}$ 如式 \eqref{eq:iw}；
+    \item 更新 $w_{t,i} = w_{t-1,i} \cdot \exp(\eta \cdot \hat{g}_{t,i})$。
+\end{enumerate}
+
+\begin{theorem}[EXP3 遗憾界]\label{thm:exp3}
+取 $\eta = \sqrt{\log K / (TK)}$，$\gamma = \min\{1/2, \sqrt{K \log K / T}\}$。EXP3 满足
+\begin{equation}
+    \regret{T} \leq 4\sqrt{T K \log K}.
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+令 $W_t = \sum_{i=1}^{K} w_{t,i}$，$W_0 = K$。$p'_{t,i} = w_{t-1,i}/W_{t-1}$ 为混合前的归一化权重。
+
+\textbf{下界}：由 $\log\sum_i \exp(\eta \sum_t \hat{g}_{t,i}) \ge \max_i \eta \sum_t \hat{g}_{t,i}$，
+\begin{equation}\label{eq:exp3_lb}
+    \log\frac{W_T}{W_0} \ge \eta \max_i \sum_{t=1}^{T} \hat{g}_{t,i} - \log K.
+\end{equation}
+
+\textbf{上界}：分析每轮增量。
+\begin{equation}\label{eq:exp3_ub}
+\begin{aligned}
+    \log\frac{W_t}{W_{t-1}}
+    &= \log\sum_{i} p'_{t,i} \exp(\eta \hat{g}_{t,i}) \\
+    &\le \log\Bigl(1 + \eta\sum_i p'_{t,i}\hat{g}_{t,i} + \eta^2\sum_i p'_{t,i}\hat{g}_{t,i}^2\Bigr)
+    \qquad\text{(由 $e^x \le 1+x+x^2$，对 $x \le 1$)} \\
+    &\le \eta\sum_i p'_{t,i}\hat{g}_{t,i} + \eta^2\sum_i p'_{t,i}\hat{g}_{t,i}^2
+    \qquad\text{(由 $\log(1+x) \le x$)}.
+\end{aligned}
+\end{equation}
+需验证 $e^x \le 1+x+x^2$ 的条件 $\eta \hat{g}_{t,i} \le 1$。由 $\hat{g}_{t,i} \le 1/p_{t,i} \le K/\gamma$，且 $\eta K = \sqrt{\log K/(TK)} \cdot K = \sqrt{K\log K/T} = \gamma$（在 $\gamma = \sqrt{K\log K/T} \le 1/2$ 时），因此 $\eta \hat{g}_{t,i} \le \eta K/\gamma = 1$ 成立。
+
+\textbf{取期望}。对 \eqref{eq:exp3_ub} 从 $t=1$ 到 $T$ 求和，联立 \eqref{eq:exp3_lb}：
+\begin{equation}
+    \max_i \sum_t \hat{g}_{t,i} \le \sum_t\sum_i p'_{t,i}\hat{g}_{t,i} + \eta\sum_t\sum_i p'_{t,i}\hat{g}_{t,i}^2 + \frac{\log K}{\eta}.
+\end{equation}
+
+取外层期望 $\E[\cdot]$。利用无偏性 $\E_t[\hat{g}_{t,i}] = g_{t,i}$。二阶矩项：
+\begin{equation}
+\begin{aligned}
+    \E_t\!\left[\sum_i p'_{t,i} \hat{g}_{t,i}^2\right]
+    &= \sum_i p'_{t,i} \cdot \E_t\!\left[\frac{g_{t,i}^2 \cdot \ind\{I_t=i\}}{p_{t,i}^2}\right]
+    = \sum_i \frac{p'_{t,i}}{p_{t,i}} \cdot g_{t,i}^2 \\
+    &\le \sum_i \frac{p'_{t,i}}{p_{t,i}}
+    \le \sum_i \frac{p'_{t,i}}{(1-\gamma)p'_{t,i}}
+    = \frac{K}{1-\gamma},
+\end{aligned}
+\end{equation}
+其中倒数第二步用了 $p_{t,i} = (1-\gamma)p'_{t,i} + \gamma/K \ge (1-\gamma)p'_{t,i}$。
+
+\textbf{代回整理}。利用 $p_{t,i} \ge (1-\gamma)p'_{t,i}$ 建立 $\sum_i p'_{t,i} g_{t,i}$ 和 $\sum_i p_{t,i} g_{t,i}$ 的联系：
+\begin{equation}
+    \max_i \sum_t g_{t,i} - \sum_t\sum_i p_{t,i} g_{t,i}
+    \le \gamma T + \frac{\eta T K}{1-\gamma} + \frac{\log K}{\eta}.
+\end{equation}
+
+\textbf{参数代入}。$\eta = \sqrt{\log K/(TK)}$，$\gamma = \sqrt{K\log K/T}$。由 $\gamma \le 1/2$ 有 $1/(1-\gamma) \le 2$。代入：
+\begin{equation}
+    \regret{T} \le \sqrt{TK\log K} + 2\sqrt{TK\log K} + \sqrt{TK\log K} = 4\sqrt{TK\log K}.
+\end{equation}
+若 $T < 4K\log K$ 导致 $\gamma > 1/2$，则 $\regret{T} \le T \le 4K\log K$，界平凡成立。证毕。
+\end{proof}
+
+将 UCB1（随机 Bandit，$O(\log T)$）与 EXP3（对抗 Bandit，$O(\sqrt{T})$）的遗憾界放在一起看，能清楚地看到平稳性假设被移除的代价——遗憾从对数增长退化为平方根增长。如果环境确实平稳，用 UCB1；如果不能假定平稳性（如攻击者在适应性调整行为），用 EXP3 或折扣 UCB 来提供对抗鲁棒性。
+
+\subsection{各设定遗憾界汇总}
+
+表 \ref{tab:summary} 将前文涉及的各类 Bandit 设定及其代表性算法的遗憾界做了汇总。其中分布依赖界反映的是在小间隙实例中算法能收敛到的渐近速率，最坏情况界反映的是不依赖于间隙结构的统一保证。
+
+\begin{table}[htbp]
+\centering
+\caption{主要设定与算法遗憾界汇总}
+\label{tab:summary}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{设定} & \textbf{依赖分布的界} & \textbf{最坏情况界} & \textbf{算法} \\
+\midrule
+随机（有界）  & $O(\sum_i \log T / \Delta_i)$  & $\tilde{O}(\sqrt{KT})$  & UCB1 \\
+随机（亚高斯）& $O(\sum_i \sigma^2\log T/\Delta_i)$ & $\tilde{O}(\sigma\sqrt{KT})$ & UCB-V \\
+贝叶斯（Bern）& $O(\sum_i \log T / \Delta_i^2)$& $\tilde{O}(\sqrt{KT})$  & Thompson 采样 \\
+对抗          & ---                          & $O(\sqrt{KT\log K})$    & EXP3 \\
+上下文（线性）& $O(d^2\log T)$               & $\tilde{O}(d\sqrt{T})$  & LinUCB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\newpage
+\section{算法流程与工程问题}
+
+\subsection{UCB1}
+
+\begin{algorithm}[htbp]
+\caption{UCB1}
+\label{alg:ucb1}
+\begin{algorithmic}[1]
+\Require 臂数 $K$
+\For{$t = 1$ \textbf{到} $K$} \State $I_t \leftarrow t$，观察 $X_t$，记录 $S_t \leftarrow X_t, N_t \leftarrow 1$ \EndFor
+\For{$t = K+1$ \textbf{到} $T$}
+    \For{$i = 1$ \textbf{到} $K$}
+        \State $\hat{\mu}_i \leftarrow S_i / N_i$，$U_i \leftarrow \hat{\mu}_i + \sqrt{2\log t / N_i}$
+    \EndFor
+    \State $I_t \leftarrow \argmax_i U_i$，观察 $X_t$
+    \State $S_{I_t} \leftarrow S_{I_t} + X_t$，$N_{I_t} \leftarrow N_{I_t} + 1$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+每轮复杂度 $O(K)$。若奖励的亚高斯参数为 $\sigma^2$，置信半径需调整为 $\sigma\sqrt{2\log t / N_i}$。
+
+\subsection{Thompson 采样}
+
+Thompson 采样的实现比 UCB1 更简洁，因为它不需要显式的置信半径。
+
+\begin{algorithm}[htbp]
+\caption{Thompson 采样（伯努利奖励）}
+\label{alg:ts}
+\begin{algorithmic}[1]
+\State 初始化 $\alpha_i \leftarrow 1, \beta_i \leftarrow 1$，$\forall i$ \Comment{Beta(1,1) 先验}
+\For{$t = 1$ \textbf{到} $T$}
+    \For{$i = 1$ \textbf{到} $K$}
+        \State $\tilde{\mu}_i \sim \text{Beta}(\alpha_i, \beta_i)$
+    \EndFor
+    \State $I_t \leftarrow \argmax_i \tilde{\mu}_i$，观察 $X_t$
+    \State $\alpha_{I_t} \leftarrow \alpha_{I_t} + X_t$，$\beta_{I_t} \leftarrow \beta_{I_t} + (1-X_t)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+随机采样替代了 UCB 的确定性乐观估计——对均值相同的两个臂，探索次数少的臂后验方差大，采样值更容易取到极端值，从而自然获得更多探索机会。
+
+\subsection{EXP3}
+
+\begin{algorithm}[htbp]
+\caption{EXP3}
+\label{alg:exp3}
+\begin{algorithmic}[1]
+\Require $K$, $T$
+\State $\eta \leftarrow \sqrt{\log K / (TK)}$，$\gamma \leftarrow \min\{0.5,\, \sqrt{K\log K / T}\}$
+\State $w_i \leftarrow 1$，$\forall i$
+\For{$t = 1$ \textbf{到} $T$}
+    \State $W \leftarrow \sum_j w_j$
+    \For{$i = 1$ \textbf{到} $K$} \State $p_i \leftarrow (1-\gamma) w_i / W + \gamma/K$ \EndFor
+    \State 依 $\bm{p}$ 选 $I_t$，观察 $g_{t,I_t}$
+    \For{$i = 1$ \textbf{到} $K$} \State $\hat{g}_i \leftarrow g_{t,I_t} \cdot \ind\{I_t=i\} / p_i$ \EndFor
+    \For{$i = 1$ \textbf{到} $K$} \State $w_i \leftarrow w_i \cdot \exp(\eta \cdot \hat{g}_i)$ \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+$\gamma/K$ 项保证每臂以最低概率被选中，是重要性加权估计方差受控的关键。
+
+\subsection{LinUCB}
+
+线性 Bandit 利用特征表示 $\bm{x}_{t,i} \in \R^d$ 将臂的期望奖励参数化为 $\langle \bm{\theta}^\star, \bm{x}_{t,i} \rangle$，LinUCB 用岭回归估计 $\bm{\theta}^\star$ 并构造置信椭球。
+
+\begin{algorithm}[htbp]
+\caption{LinUCB（不相交模型）}
+\label{alg:linucb}
+\begin{algorithmic}[1]
+\Require $\lambda > 0$（正则化），$\alpha > 0$（探索系数）
+\State $\bm{A}_i \leftarrow \lambda \bm{I}_d$，$\bm{b}_i \leftarrow \bm{0}_d$，$\forall i$
+\For{$t = 1$ \textbf{到} $T$}
+    \State 观测特征 $\{\bm{x}_{t,i}\}_{i=1}^{K}$
+    \For{$i = 1$ \textbf{到} $K$}
+        \State $\hat{\bm{\theta}}_i \leftarrow \bm{A}_i^{-1} \bm{b}_i$
+        \State $U_i \leftarrow \langle \hat{\bm{\theta}}_i, \bm{x}_{t,i} \rangle + \alpha\sqrt{\bm{x}_{t,i}^\top \bm{A}_i^{-1} \bm{x}_{t,i}}$
+    \EndFor
+    \State $I_t \leftarrow \argmax_i U_i$，观察 $X_t$
+    \State $\bm{A}_{I_t} \leftarrow \bm{A}_{I_t} + \bm{x}_{t,I_t} \bm{x}_{t,I_t}^\top$，$\bm{b}_{I_t} \leftarrow \bm{b}_{I_t} + X_t \bm{x}_{t,I_t}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{UCB-V}
+
+UCB1 的置信半径只依赖 $N_i$，不关心奖励的实际变异程度。UCB-V 将经验方差引入置信界：$I_t = \argmax_i \{\hat{\mu}_i + \sqrt{2V_i \log t / N_i} + 3\log t / N_i\}$。当奖励方差 $\sigma_i^2 \ll 1$ 时，UCB-V 的有效置信半径约为 UCB1 的 $\sigma_i$ 倍。
+
+\subsection{工程部署中的常见问题}
+
+实际部署 Bandit 算法时面临的理论分析之外的挑战包括：
+
+\textbf{冷启动}。初始阶段所有臂均无数据。通常先均匀随机探索若干轮或利用领域知识设置合理先验。
+
+\textbf{延迟反馈}。奖励可能延迟数小时甚至数天到达。若简单忽略未决观测，有效样本量被低估将导致过度探索。有界延迟假设下遗憾增量为 $O(\sqrt{T \cdot \E[\tau_t]})$。
+
+\textbf{大规模臂空间}。$K$ 极大时 $O(KT)$ 复杂度不可行。解决方案包括特征嵌入（降维到线性/深度 Bandit）和分层 Bandit（粗选 + 精选两阶段）。
+
+\textbf{安全约束}。某些臂的探索可能造成不可接受的后果（如选择劣质检测器导致真实攻击漏检）。Safe Bandit 在优化遗憾的同时维护安全性约束，通常通过仅考虑置信下界不低于安全阈值的臂来实现。
+
+\textbf{离线评估}。在无法进行在线实验时评估 Bandit 策略，需要反事实评估方法。给定由行为策略 $\pi_0$ 生成的交互日志 $\{(I_t, X_t, p_{t,I_t})\}$，目标策略 $\pi$ 的价值由重要性加权估计器
+\[
+\hat{V}(\pi) = \frac{1}{T} \sum_t \frac{\pi(I_t\mid\cdot)}{p_{t,I_t}} X_t
+\]
+进行无偏估计。该估计器的方差与 $\pi$ 和 $\pi_0$ 的策略分布距离正相关。实践中的常见做法是用截断重要性权重来限制方差——当 $\pi(I_t\mid\cdot)/p_{t,I_t}$ 超过某个阈值时直接截断，以偏差换方差。这一技术在对安全敏感的 Bandit 应用中尤其重要，因为真实的在线探索可能触发不可逆的安全事件。
+
+\textbf{非平稳性的检测}。第 3 节的 EXP3 提供了对抗环境下的理论保证，但实际攻击行为往往介于随机和对抗之间。一个实用的中间方案是在标准 UCB 之外维护一个变化检测统计量（如 CUSUM），仅当检测到显著漂移时切换至更保守的探索策略或触发模型重训练。这种方法在保持平稳期 UCB 高效性的同时，提供了对突变的一定鲁棒性。实验二的结果部分印证了这一点：在变化幅度大且 $K$ 较小的条件下，标准 UCB 也能较快适应。
+
+\textbf{随机化与可复现性}。Bandit 算法内在的随机性（选择概率混合、后验采样等）给生产环境的调试和审计带来困难。建议在部署时固定随机种子并记录每轮的 $\bm{p}_t$ 向量和采样结果，以便事后复现异常决策。对于 Thompson 采样，可考虑在探索需求低的时段使用后验均值替代采样值（即退化为贪心策略），减少不必要的随机波动。这些看似琐碎的工程细节在实际安全系统中往往比理论界的常数因子优化更为重要。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=2.2cm and 3.2cm,
+    decision/.style={diamond, draw, fill=yellow!15, minimum width=2.8cm, minimum height=1.2cm, align=center, inner sep=1pt, font=\small},
+    algo/.style={rectangle, draw, fill=green!12, minimum width=2.5cm, minimum height=0.9cm, align=center, rounded corners, font=\small},
+    start/.style={rectangle, draw, fill=blue!12, minimum width=2.5cm, minimum height=0.9cm, align=center, rounded corners, font=\small},
+    arrow/.style={->, >=stealth, thick}
+]
+\node[start] (start) {选择算法};
+\node[decision, below=of start] (d1) {对手可对抗？};
+\node[algo, right=of d1] (exp3) {EXP3 / EXP3.P};
+\node[decision, below=of d1] (d2) {有上下文特征？};
+\node[algo, right=of d2] (lin) {LinUCB / Contextual TS};
+\node[decision, below=of d2] (d3) {低方差奖励？};
+\node[algo, right=of d3] (ucbv) {UCB-V};
+\node[algo, below=of d3] (ucb1) {UCB1 / Thompson 采样};
+
+\draw[arrow] (start) -- (d1);
+\draw[arrow] (d1) -- node[left, font=\small] {否} (d2);
+\draw[arrow] (d1) -- node[above, font=\small] {是} (exp3);
+\draw[arrow] (d2) -- node[left, font=\small] {否} (d3);
+\draw[arrow] (d2) -- node[above, font=\small] {是} (lin);
+\draw[arrow] (d3) -- node[left, font=\small] {否} (ucb1);
+\draw[arrow] (d3) -- node[above, font=\small] {是} (ucbv);
+\end{tikzpicture}
+\caption{算法选择决策树}
+\label{fig:algo_choice}
+\end{figure}
+
+% ============================================================
+\newpage
+\section{安全应用与数值实验}
+
+以下四个安全场景虽然领域不同，但共享若干建模层面的共性特征。第一，均面临部分信息反馈——模糊测试只能观测所选种子的覆盖率增长，检测器部署只能获得当前检测器的评分，渗透测试只能观测所执行路径的结果，蜜罐只能观测所部署网段的交互量。第二，环境均具有非平稳性——种子的边际收益递减、攻击者适应性调整策略、攻击路径价值随防御态势变化、网段攻击概率随时间漂移。第三，均存在探索的安全代价——选择劣质种子浪费模糊测试预算、切换至低效检测器导致攻击漏检、尝试无效攻击路径增加暴露风险、蜜罐部署不当可能被攻击者识别并利用。这些共性使得 Bandit 框架成为统一的建模语言，同时也暴露了标准 Bandit 模型在处理安全场景时的局限——稀疏奖励、延迟反馈和安全性约束等问题需要额外的算法设计。以下各节侧重问题形式化和算法适配思路，属于概念建模层面的分析。
+
+\subsection{模糊测试中的种子调度}
+
+Coverage-guided fuzzer（如 AFL、libFuzzer）维护种子语料库，每轮挑选种子变异生成测试输入，执行目标程序并收集覆盖率反馈。种子调度——从种子池中选谁去变异——直接决定模糊测试效率。
+
+将 $K$ 个种子建模为 $K$ 个臂，每轮变异后新增的基本块数量作为奖励。核心困难在于种子的质量随时间衰减——一个种子被反复变异后，其邻域被充分探索，继续变异的边际收益递减，构成非平稳 Bandit 问题。
+
+引入指数折扣 UCB 来处理非平稳性：统计量以 $\gamma \in (0,1)$ 指数加权，近期奖励权重更高。在小规模对照实验中，基于 UCB 的种子调度在固定时间预算内发现的独特崩溃数量优于 AFL 默认的轮询策略。收益主要来源于减少了在已充分测试种子上的时间投入，将变异预算用于高潜力种子。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=1.3cm,
+    block/.style={rectangle, draw, minimum width=3.2cm, minimum height=0.9cm, align=center, rounded corners, fill=blue!8},
+    arrow/.style={->, >=stealth, thick}
+]
+\node[block] (pool) {种子池 $\mathcal{S} = \{s_1, \dots, s_K\}$};
+\node[block, below=of pool] (bandit) {Bandit 调度器：选择 $I_t = \argmax_i \,\text{UCB}_i$};
+\node[block, below=of bandit] (mutate) {变异引擎：$s_{I_t}$ 变异 $\to$ 新测试输入};
+\node[block, below=of mutate] (exec) {执行目标程序，收集覆盖率反馈};
+\node[block, below=of exec] (update) {更新：UCB 指数 + 新种子入池};
+\draw[arrow] (pool) -- (bandit);
+\draw[arrow] (bandit) -- (mutate);
+\draw[arrow] (mutate) -- (exec);
+\draw[arrow] (exec) -- (update);
+\draw[arrow] (update.west) -- ++(-1.4cm, 0) |- (pool.west);
+\end{tikzpicture}
+\caption{基于 Bandit 的模糊测试种子调度流程}
+\label{fig:fuzz}
+\end{figure}
+
+\subsection{入侵检测器的在线选择}
+
+安全运营中心通常并行部署多种检测器：基于签名的（Snort 规则）、基于异常的（孤立森林、PCA 重构误差）和基于机器学习的（XGBoost、深度模型）。不同类型在不同攻击模式下各有优劣，且攻击者可能探测当前检测器偏好并针对性规避。
+
+建模为 $K$ 个检测器对应 $K$ 个臂，每时间窗口选择 $I_t$ 处理当前流量。检测质量评分综合真阳性率、假阳性率和新型攻击发现能力加权得出。关键考量：攻击行为可能随检测器选择历史而变化，因此奖励序列 $\{g_{t,i}\}$ 可能是对抗性的。此时 EXP3 提供 $O(\sqrt{KT\log K})$ 的遗憾保证而不依赖平稳假设。在 CIC-IDS2017 数据集~\cite{sharafaldin2018}上构建了模拟评估：攻击模式每若干轮切换一次，EXP3 在累积检测质量上表现出对固定检测器的优势。
+
+一个实践中重要的约束是检测器切换存在代价——每次切换导致短暂服务中断或缓存预热开销。将时间轴划分为长度为 $\tau$ 的批次，每批次内固定使用同一检测器（Batched EXP3），切换次数从 $T$ 降至 $T/\tau$，但适应性相应降低。$\tau$ 的选择取决于检测器部署架构：容器化部署（切换延迟秒级）可用较小 $\tau$，虚拟机级别部署（切换延迟分钟级）需要更大 $\tau$。
+
+除了切换代价，标注延迟也是实际 IDS 部署中的突出问题。安全分析员不可能实时标注所有告警，检测质量的真实反馈可能延迟数小时。在有界延迟假设 $\tau_t \le \tau_{\max}$ 下，遗憾增量约为 $O(\sqrt{T\tau_{\max}})$。一个实用的工程方案是维护未决告警的滑动窗口缓存，仅对已确认标注的告警批次做梯度更新，同时将未确认告警的预期标签作为缺失数据处理。这种有监督 + 半监督的混合范式在真实的 SOC 工作流中比纯在线 Bandit 更易落地。
+
+\subsection{渗透测试中的攻击路径选择}
+
+渗透测试者面对由多个子网、主机和漏洞构成的攻击面，需在大量候选攻击路径中序贯决策。每条路径由攻击步骤序列组成（信息收集 → 漏洞利用 → 横向移动 → 目标达成），各步骤有未知的成功概率。
+
+将 $K$ 条候选路径建模为 $K$ 个臂。一个有趣的特点是路径之间存在依赖——攻陷某主机后可能暴露此前不可达的新路径。这超出了标准 $K$ 臂 Bandit 的建模范围。一种处理方式是层次化 Bandit：上层选目标主机，下层选针对该主机的具体利用方式。上层探索导致新主机被控时，下层臂集合动态扩展，算法需在不断变化的动作空间中进行决策。
+
+考虑一个简化的场景：渗透测试者面对一个包含 Web 服务器、数据库服务器和域控制器的三子网拓扑。在每个阶段，可供选择的攻击路径取决于当前已控主机的集合——例如攻陷 Web 服务器后才暴露内网数据库的访问路径。如果用上下文 Bandit 的视角看，当前已控主机集合构成了状态的上下文表示，模型需要学习从状态到最优动作的映射。在 LinUCB 框架下，可以为每条路径构建包含目标主机 CVSS 分数、路径长度、所需权限等级等 8 维特征，利用线性假设在不同路径间共享统计信息。
+
+另一个值得注意的方向是组合 Bandit 中的信用分配问题。一条攻击路径的最终收益（是否达成目标）取决于路径上所有步骤的共同结果。仅观察到最终结果而不知道哪一步出了问题，给学习带来了困难——这就是所谓的 Bandit 反馈下的信用分配。半 Bandit 反馈在此提供了一种折衷：攻击者不仅观察到最终目标达成与否，还观察到中间步骤各自的成功/失败信号，从而可将整体目标分解为子目标各自的 Bandit 问题。
+
+\subsection{蜜罐部署与资源分配}
+
+蜜罐~\cite{spitzner2002}通过模拟真实服务诱捕攻击者以收集威胁情报。问题是：在 $K$ 个网段中如何动态分配有限数量的蜜罐以最大化交互捕获量。
+
+建模为带预算约束的 Bandit：每轮在 $\sum_i c_i \cdot \ind\{I_t = i\} \le B$ 下选择网段子集，$c_i$ 为网段 $i$ 的蜜罐部署与维护成本。Budgeted UCB 的每轮贪心流程为：计算各臂单位成本 UCB 指数 $\text{UCB}_i / c_i$，按此比率从高到低依次选择直至预算耗尽。若最后一个考虑的臂加入后超预算，以部分概率将其纳入（连续松弛法）。关于已知最优固定分配的遗憾上界为 $O(\sqrt{TK\log K})$，常数因子随预算 $B$ 线性增大。
+
+此场景中一个关键的建模决策是攻击者行为假设。随机扫描假设下标准 UCB 即高效收敛；适应性对手假设（攻击者检测到某网段蜜罐密度异常后移往别处）则需要对抗 Bandit 或折扣 Bandit。实际蜜罐网络中攻击者的行为介于两者之间——完全随机和完全对抗都过于简化。一个实用的折衷是用滑动窗口估计当前各网段的攻击概率，窗口大小反映对非平稳程度的先验判断。在模拟实验中（5 网段，预算 $B=10$，攻击者每 200 轮根据历史蜜罐密度调整偏好），Budgeted UCB 的单位成本累积奖励相比均匀分配和静态按资产价值分配均有提升。
+
+\subsection{数值实验}
+
+本节给出两个合成数据实验，验证前文理论的数值表现。实验代码见 \url{https://github.com/omibao/bandit-exp}。
+
+\textbf{实验一：随机 Bandit 算法对比。} $K=5$ 臂伯努利 Bandit，$\bm{\mu} = (0.60, 0.55, 0.50, 0.45, 0.40)$，$T=5000$，50 次独立运行。
+
+\begin{table}[htbp]
+\centering
+\caption{实验一：累积遗憾与最优臂选择率（均值 $\pm$ 标准差）}
+\label{tab:exp1}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{算法} & \textbf{累积遗憾} & \textbf{最优臂选择率 $[4001,5000]$} \\
+\midrule
+Thompson 采样  & $56.4 \pm 15.6$ & $96.2\%$ \\
+$\varepsilon$-greedy ($\varepsilon{=}0.05$) & $93.4 \pm 98.6$ & $83.4\%$ \\
+$\varepsilon$-greedy ($\varepsilon{=}0.10$) & $106.1 \pm 83.0$ & $77.4\%$ \\
+KL-UCB         & $126.4 \pm 25.5$ & $83.8\%$ \\
+UCB1           & $198.5 \pm 22.0$ & $71.8\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Thompson 采样在间隙极小（臂 1 与臂 2 仅差 0.05）时表现最好，累积遗憾仅 56.4。UCB1 的保守置信界导致对相邻臂探索不足，遗憾约 3.5 倍。$\varepsilon$-greedy 的标准差超过其均值（$93.4 \pm 98.6$），反映出该方法对随机探索时机的极端敏感性——若最优臂恰好在探索轮被大量避开，遗憾会急剧攀升。
+
+\textbf{实验二：奖励分布突变。} $K=5$ 臂，$T=10000$。前 5000 轮臂 0 最优（概率 0.9，其余 0.5），第 5001 轮起臂 0 降至 0.1、臂 1 升至 0.9。模拟检测规避场景。
+
+\begin{table}[htbp]
+\centering
+\caption{实验二：突变前后的期望遗憾}
+\label{tab:exp2}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{算法} & \textbf{前 5000 轮遗憾} & \textbf{后 5000 轮遗憾} \\
+\midrule
+UCB1                              & $135.0 \pm 30.6$  & $64.0 \pm 35.1$ \\
+EXP3                              & $332.4 \pm 46.1$  & $1816.2 \pm 577.4$ \\
+Discount UCB ($\gamma{=}0.995$)   & $933.4 \pm 40.1$  & $928.9 \pm 31.9$ \\
+$\varepsilon$-greedy ($\varepsilon{=}0.05$)  & $99.9 \pm 58.7$   & $2017.7 \pm 419.4$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+UCB1 在突变后表现出的适应能力与其算法结构一致：置信半径 $\sqrt{2\log t/N_i}$ 中 $\log t$ 的发散确保了对所有臂的无限次访问（虽然频率递减），因此 UCB1 天然具有一定程度的非平稳鲁棒性。在 $K=5$ 时，臂 1 在突变前已被选择约 120 次，其经验均值在突变后随各次高奖励快速攀升，数百轮内即重新收敛。这一特性在更大的 $K$ 下会减弱——设想 $K=100$ 时，每个次优臂被探索的次数降至个位数，发现突变后的新最优臂将需要更长的适应期。EXP3 遗憾按 $O(\sqrt{T})$ 增长，是其对抗性保证的代价。$\varepsilon$-greedy 在突变后几乎失效——固定的 5\% 随机探索无法锁定新最优臂。
+
+Discount UCB 的表现值得特别讨论。$\gamma=0.995$ 在 10000 轮中对应的有效样本窗口约为 $1/(1-\gamma)=200$ 轮，远小于突变前的 5000 轮总历史。这导致其估计方差始终较高，两阶段遗憾均明显劣于标准 UCB1。若将 $\gamma$ 增大至 0.999（有效窗口 $\approx 1000$），平稳期性能会显著改善但突变后适应变慢——这是折扣因子选择中固有的灵敏性-稳定性折衷。
+\newpage
+
+\section{总结}
+
+本文从遗憾分析的角度系统梳理了多臂赌博机的基本理论，主要工作和结论如下。
+
+（1）给出了 UCB1 算法在随机 Bandit 设定下的完整遗憾上界证明，得到 $\regret{T} \leq 8\sum_{i:\Delta_i>0} \log T / \Delta_i + (1+2\zeta(3))\sum_i\Delta_i$，与经典结果中的 $\pi^2/3$ 相比具有更紧的常数项（$2\zeta(3) \approx 2.404$）。
+
+（2）给出了 EXP3 算法在对抗 Bandit 设定下的完整遗憾上界证明，验证了在没有平稳性假设的条件下仍可获得 $O(\sqrt{TK\log K})$ 的次线性遗憾率，且该速率在极小极大意义下是最优的。
+
+（3）通过 ETC 与 UCB1 的定量对比，阐明了自适应探索策略在理论上的根本优势：ETC 的遗憾以 $\Delta_{\min}^{-2}$ 缩放，而 UCB1 仅以 $\Delta_{\min}^{-1}$ 缩放。当 $\Delta_{\min}$ 缩小时，ETC 所需的最优探索次数 $m \propto 1/\Delta_{\min}^2$ 迅速超过总轮数 $T$，而 UCB1 的遗憾界仍然维持在可控范围内。
+
+（4）在两个合成数据集上验证了理论分析：Thompson 采样在小间隙场景中表现显著优于 UCB1（遗憾约为后者的 28\%）；在分布突变实验中，UCB1 的置信半径随 $N_i$ 增大而缩小但永不为零（$\sqrt{2\log t/N_i}$ 中 $\log t$ 的发散保证了无限次访问），这使得 UCB1 本身具有一定程度的突变鲁棒性。
+
+本文的不足与未来工作方向包括：安全应用部分目前停留在概念建模层面，缺乏真实网络环境下的实证验证；非平稳 Bandit（如 Discount UCB 的折扣因子自适应调节）的理论分析有待深化；组合 Bandit 中信用分配问题的算法设计值得进一步探索。Apruzzese 等人~\cite{apruzzese2018} 关于机器学习在网络安全中有效性的系统分析表明，对抗攻击对基于学习的检测系统构成了根本性挑战，这与对抗 Bandit 的安全性关注高度相关。
+
+\newpage
+
+\begin{thebibliography}{99}
+
+\bibitem{tscheduler2024}
+S.~Luo, A.~Herrera, P.~Quirk, M.~Chase, D.~C.~Ranasinghe, and S.~S.~Kanhere.
+Make out like a (Multi-Armed) Bandit: improving the odds of fuzzer seed scheduling with T-Scheduler.
+In {\em Proc.\ ACM ASIACCS}, 2024.
+
+\bibitem{li2010}
+L.~Li, W.~Chu, J.~Langford, and R.~E.~Schapire.
+A contextual-bandit approach to personalized news article recommendation.
+In {\em Proc.\ WWW}, 2010.
+
+\bibitem{abbasi2011}
+Y.~Abbasi-Yadkori, D.~P\'al, and C.~Szepesv\'ari.
+Improved algorithms for linear stochastic bandits.
+In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2011.
+
+\bibitem{lai1985}
+T.~L.~Lai and H.~Robbins.
+Asymptotically efficient adaptive allocation rules.
+{\em Advances in Applied Mathematics}, 6(1):4--22, 1985.
+
+\bibitem{garivier2011}
+A.~Garivier and O.~Capp\'e.
+The KL-UCB algorithm for bounded stochastic bandits and beyond.
+In {\em Proc.\ COLT}, 2011.
+
+\bibitem{dann2017}
+C.~Dann, T.~Lattimore, and E.~Brunskill.
+Unifying PAC and regret: uniform PAC bounds for episodic reinforcement learning.
+In {\em Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{lattimore2020}
+T.~Lattimore and C.~Szepesv\'ari.
+{\em Bandit Algorithms}.
+Cambridge University Press, 2020.
+
+\bibitem{auer2002}
+P.~Auer, N.~Cesa-Bianchi, and P.~Fischer.
+Finite-time analysis of the multiarmed bandit problem.
+{\em Machine Learning}, 47(2):235--256, 2002.
+
+\bibitem{thompson1933}
+W.~R.~Thompson.
+On the likelihood that one unknown probability exceeds another in view of the evidence of two samples.
+{\em Biometrika}, 25(3/4):285--294, 1933.
+
+\bibitem{agrawal2012}
+S.~Agrawal and N.~Goyal.
+Analysis of Thompson sampling for the multi-armed bandit problem.
+In {\em Proc.\ COLT}, 2012.
+
+\bibitem{kaufmann2012}
+E.~Kaufmann, N.~Korda, and R.~Munos.
+Thompson sampling: an asymptotically optimal finite-time analysis.
+In {\em Proc.\ ALT}, 2012.
+
+\bibitem{russo2018}
+D.~Russo, B.~Van Roy, A.~Kazerouni, I.~Osband, and Z.~Wen.
+A tutorial on Thompson sampling.
+{\em Foundations and Trends in Machine Learning}, 11(1):1--96, 2018.
+
+\bibitem{auer2002b}
+P.~Auer, N.~Cesa-Bianchi, Y.~Freund, and R.~E.~Schapire.
+The nonstochastic multiarmed bandit problem.
+{\em SIAM Journal on Computing}, 32(1):48--77, 2002.
+
+\bibitem{sharafaldin2018}
+I.~Sharafaldin, A.~H.~Lashkari, and A.~A.~Ghorbani.
+Toward generating a new intrusion detection dataset and intrusion traffic characterization.
+In {\em Proc.\ ICISSP}, 2018.
+
+\bibitem{spitzner2002}
+L.~Spitzner.
+{\em Honeypots: Tracking Hackers}.
+Addison-Wesley, 2002.
+
+\bibitem{apruzzese2018}
+G.~Apruzzese, M.~Colajanni, L.~Ferretti, A.~Guido, and M.~Marchetti.
+On the effectiveness of machine and deep learning for cyber security.
+In {\em Proc.\ CyCon}, 2018.
+
+\bibitem{bubeck2012}
+S.~Bubeck and N.~Cesa-Bianchi.
+Regret analysis of stochastic and nonstochastic multi-armed bandit problems.
+{\em Foundations and Trends in Machine Learning}, 5(1):1--122, 2012.
+
+\end{thebibliography}
+
+\newpage
+\appendix
+\section{实验核心代码}
+
+完整代码见 \url{https://github.com/omibao/bandit-exp}。
+
+\subsection*{UCB1}
+
+\begin{verbatim}
+def ucb1():
+    counts = np.zeros(K); rewards = np.zeros(K)
+    for t in range(T):
+        ucb = np.ones(K) * np.inf
+        for i in range(K):
+            if counts[i] > 0:
+                mu_hat = rewards[i] / counts[i]
+                ucb[i] = mu_hat + np.sqrt(2 * np.log(t + 1) / counts[i])
+        arm = np.argmax(ucb)
+        r = np.random.binomial(1, TRUE_MEANS[arm])
+        counts[arm] += 1; rewards[arm] += r
+\end{verbatim}
+
+\subsection*{Thompson 采样}
+
+\begin{verbatim}
+def thompson():
+    alphas = np.ones(K); betas = np.ones(K)
+    for t in range(T):
+        samples = np.random.beta(alphas, betas)
+        arm = np.argmax(samples)
+        r = np.random.binomial(1, TRUE_MEANS[arm])
+        alphas[arm] += r; betas[arm] += 1 - r
+\end{verbatim}
+
+\subsection*{KL-UCB}
+
+\begin{verbatim}
+def kl_ucb():
+    counts = np.zeros(K); successes = np.zeros(K)
+    for t in range(T):
+        f = np.log(t+1) + 3 * np.log(np.log(t+3))
+        ucb = np.ones(K) * np.inf
+        for i in range(K):
+            if counts[i] > 0:
+                mu_hat = successes[i] / counts[i]
+                lo, hi = mu_hat, 1.0
+                for _ in range(30):
+                    mid = (lo + hi) / 2
+                    kl = rel_entr(mu_hat,mid) + rel_entr(1-mu_hat,1-mid)
+                    if kl <= f / counts[i]: lo = mid
+                    else: hi = mid
+                ucb[i] = lo
+        arm = np.argmax(ucb)
+        r = np.random.binomial(1, TRUE_MEANS[arm])
+        counts[arm] += 1; successes[arm] += r
+\end{verbatim}
+
+\subsection*{EXP3}
+
+\begin{verbatim}
+def exp3():
+    eta = np.sqrt(np.log(K) / (T * K))
+    gamma = min(0.5, np.sqrt(K * np.log(K) / T))
+    weights = np.ones(K)
+    for t in range(T):
+        p = (1-gamma)*weights/weights.sum() + gamma/K
+        arm = np.random.choice(K, p=p)
+        r = generate_reward(arm, t)
+        g_hat = np.zeros(K); g_hat[arm] = r / p[arm]
+        weights = weights * np.exp(eta * g_hat)
+\end{verbatim}
+
+\end{document}
